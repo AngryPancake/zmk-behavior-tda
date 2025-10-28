@@ -3,7 +3,9 @@ description: Advanced Tap Dance behavior for ZMK
 
 compatible: "zmk,behavior-tda"
 
-include: one_param.yaml
+# include: one_param.yaml
+include: no_params.yaml
+
 
 properties:
   tapping-term-ms:
