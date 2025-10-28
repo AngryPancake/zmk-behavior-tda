@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT
+
+config ZMK_BEHAVIOR_TDA
+    bool "Tap Dance Advanced behavior"
+    default y
+    depends on ZMK_BEHAVIORS
+    help
+      Advanced Tap Dance that triggers the first action immediately and upgrades on further taps.
+
+config ZMK_BEHAVIOR_TDA_MAX_HELD
+    int "Maximum simultaneously held TDA keys"
+    default 4

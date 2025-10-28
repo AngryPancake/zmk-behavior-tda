@@ -1,0 +1,7 @@
+name: zmk-behavior-tda
+
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    dts_root: .
