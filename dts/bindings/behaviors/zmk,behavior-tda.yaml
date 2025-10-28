@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: MIT
-description: Tap Dance Advanced behavior for ZMK
+description: Advanced Tap Dance behavior for ZMK
 
 compatible: "zmk,behavior-tda"
 
-include:
-  - zmk,behavior-base.yaml
+include: one_param.yaml
 
 properties:
   tapping-term-ms:
     type: int
-    required: true
-    description: Time window in milliseconds to detect multiple taps.
+    required: false
+    description: "Tap dance timeout (ms)"
   bindings:
-    type: phandles
+    type: phandle-array
     required: true
-    description: List of behaviors for each tap count.
+    description: "Bindings for tap and hold actions"
