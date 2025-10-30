@@ -9,7 +9,6 @@
 #define DT_DRV_COMPAT zmk_behavior_tda
 
 #include <zephyr/device.h>
-#include <drivers/behavior.h>
 #include <zephyr/logging/log.h>
 #include <zmk/behavior.h>
 #include <zmk/keymap.h>
