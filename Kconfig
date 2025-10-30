@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: MIT
 
+DT_COMPAT_ZMK_BEHAVIOR_TDA := zmk,behavior-tda
+
 config ZMK_BEHAVIOR_TDA
     bool "Tap Dance Advanced behavior"
-    default y
-    depends on ZMK_BEHAVIORS
+    default $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_TDA))
     help
       Advanced Tap Dance that triggers the first action immediately and upgrades on further taps.
 
