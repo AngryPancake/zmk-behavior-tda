@@ -9,13 +9,18 @@
 #define DT_DRV_COMPAT zmk_behavior_tda
 
 #include <zephyr/device.h>
+#include <drivers/behavior.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/device.h>
+#include <drivers/behavior.h>
 #include <zephyr/logging/log.h>
 #include <zmk/behavior.h>
+#include <zmk/behavior_queue.h>
 #include <zmk/keymap.h>
 #include <zmk/matrix.h>
 #include <zmk/event_manager.h>
 #include <zmk/events/position_state_changed.h>
-#include <zmk/events/keycode_state_changed.h>
+#include <zmk/events/layer_state_changed.h>
 #include <zmk/hid.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
