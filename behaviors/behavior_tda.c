@@ -23,7 +23,13 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 
-#define ZMK_BHV_TDA_MAX_HELD CONFIG_ZMK_BEHAVIOR_TDA_MAX_HELD
+/*
+ * Tap Dance Advanced (TDA):
+ * - выполняет следующее действие при каждом нажатии (мгновенно)
+ * - сбрасывает счётчик, если с последнего нажатия прошло tapping-term-ms
+ */
+
+#define ZMK_BHV_TDA_MAX_HELD CONFIG_ZMK_BEHAVIOR_TAP_DANCE_MAX_HELD
 #define ZMK_BHV_TDA_POSITION_FREE UINT32_MAX
 
 struct behavior_tda_config {
@@ -33,159 +39,154 @@ struct behavior_tda_config {
 };
 
 struct active_tda {
-    int counter;
     uint32_t position;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
     uint8_t source;
 #endif
+    int counter;
     bool is_pressed;
-    bool timer_cancelled;
-    bool tap_dance_decided;
-    int64_t release_at;
     const struct behavior_tda_config *config;
-    struct k_work_delayable release_timer;
+    int64_t last_press_time;
+    struct k_work_delayable reset_timer;
+    bool timer_active;
 };
 
-static struct active_tda active_tdas[ZMK_BHV_TDA_MAX_HELD];
+static struct active_tda active_tdas[ZMK_BHV_TDA_MAX_HELD] = {};
 
 static void clear_tda(struct active_tda *tda) {
     tda->position = ZMK_BHV_TDA_POSITION_FREE;
-    tda->counter = 0;
     tda->is_pressed = false;
-    tda->timer_cancelled = false;
-    tda->tap_dance_decided = false;
+    tda->counter = 0;
+    tda->timer_active = false;
 }
 
 static struct active_tda *find_tda(uint32_t position) {
     for (int i = 0; i < ZMK_BHV_TDA_MAX_HELD; i++) {
-        if (active_tdas[i].position == position && !active_tdas[i].timer_cancelled)
+        if (active_tdas[i].position == position)
             return &active_tdas[i];
     }
     return NULL;
 }
 
-static int new_tda(struct zmk_behavior_binding_event *event,
-                   const struct behavior_tda_config *config,
-                   struct active_tda **tda) {
+static struct active_tda *new_tda(struct zmk_behavior_binding_event *event,
+                                  const struct behavior_tda_config *config) {
     for (int i = 0; i < ZMK_BHV_TDA_MAX_HELD; i++) {
-        struct active_tda *slot = &active_tdas[i];
-        if (slot->position == ZMK_BHV_TDA_POSITION_FREE) {
-            slot->position = event->position;
+        struct active_tda *tda = &active_tdas[i];
+        if (tda->position == ZMK_BHV_TDA_POSITION_FREE) {
+            tda->position = event->position;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
-            slot->source = event->source;
+            tda->source = event->source;
 #endif
-            slot->config = config;
-            slot->release_at = 0;
-            slot->is_pressed = true;
-            slot->timer_cancelled = false;
-            slot->tap_dance_decided = false;
-            slot->counter = 0;
-            *tda = slot;
-            return 0;
+            tda->counter = 0;
+            tda->is_pressed = false;
+            tda->config = config;
+            tda->timer_active = false;
+            tda->last_press_time = 0;
+            return tda;
         }
     }
-    return -ENOMEM;
+    return NULL;
 }
 
-static void reset_timer(struct active_tda *tda, struct zmk_behavior_binding_event event) {
-    tda->release_at = event.timestamp + tda->config->tapping_term_ms;
-    int32_t ms_left = tda->release_at - k_uptime_get();
-    if (ms_left > 0) {
-        k_work_schedule(&tda->release_timer, K_MSEC(ms_left));
-    }
+static void reset_tda_counter(struct active_tda *tda) {
+    LOG_DBG("TDA[%d]: reset counter after timeout", tda->position);
+    tda->counter = 0;
+    tda->timer_active = false;
 }
 
-static inline int press_tda_behavior(struct active_tda *tda, int64_t timestamp) {
-    tda->tap_dance_decided = true;
-    struct zmk_behavior_binding binding = tda->config->behaviors[tda->counter - 1];
-    struct zmk_behavior_binding_event event = {
-        .position = tda->position,
-        .timestamp = timestamp,
-#if IS_ENABLED(CONFIG_ZMK_SPLIT)
-        .source = tda->source,
-#endif
-    };
-    return zmk_behavior_invoke_binding(&binding, event, true);
-}
-
-static inline int release_tda_behavior(struct active_tda *tda, int64_t timestamp) {
-    struct zmk_behavior_binding binding = tda->config->behaviors[tda->counter - 1];
-    struct zmk_behavior_binding_event event = {
-        .position = tda->position,
-        .timestamp = timestamp,
-#if IS_ENABLED(CONFIG_ZMK_SPLIT)
-        .source = tda->source,
-#endif
-    };
-    return zmk_behavior_invoke_binding(&binding, event, false);
-}
-
-static void tda_timer_handler(struct k_work *item) {
+static void tda_reset_timer_handler(struct k_work *item) {
     struct k_work_delayable *d_work = k_work_delayable_from_work(item);
-    struct active_tda *tda = CONTAINER_OF(d_work, struct active_tda, release_timer);
+    struct active_tda *tda = CONTAINER_OF(d_work, struct active_tda, reset_timer);
+    if (tda->position == ZMK_BHV_TDA_POSITION_FREE)
+        return;
+    reset_tda_counter(tda);
+}
 
-    if (tda->position == ZMK_BHV_TDA_POSITION_FREE || tda->timer_cancelled)
+static void restart_reset_timer(struct active_tda *tda) {
+    if (tda->config->tapping_term_ms == 0)
         return;
 
-    // Таймер истёк: просто завершаем "танец"
-    if (!tda->is_pressed) {
-        release_tda_behavior(tda, tda->release_at);
-        clear_tda(tda);
+    if (tda->timer_active) {
+        k_work_cancel_delayable(&tda->reset_timer);
     }
+
+    k_work_schedule(&tda->reset_timer, K_MSEC(tda->config->tapping_term_ms));
+    tda->timer_active = true;
 }
 
 static int on_tda_pressed(struct zmk_behavior_binding *binding,
                           struct zmk_behavior_binding_event event) {
     const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
     const struct behavior_tda_config *cfg = dev->config;
-    struct active_tda *tda = find_tda(event.position);
 
-    if (tda == NULL) {
-        if (new_tda(&event, cfg, &tda) != 0)
+    struct active_tda *tda = find_tda(event.position);
+    if (!tda) {
+        tda = new_tda(&event, cfg);
+        if (!tda) {
+            LOG_ERR("No free TDA slots");
             return ZMK_BEHAVIOR_OPAQUE;
+        }
+        k_work_init_delayable(&tda->reset_timer, tda_reset_timer_handler);
     }
+
+    // Если давно не нажимали — сбрасываем
+    if (cfg->tapping_term_ms > 0 &&
+        (k_uptime_get() - tda->last_press_time > cfg->tapping_term_ms)) {
+        tda->counter = 0;
+    }
+
+    tda->last_press_time = k_uptime_get();
+
+    if (cfg->behavior_count == 0)
+        return ZMK_BEHAVIOR_OPAQUE;
+
+    // Переходим к следующему binding
+    tda->counter++;
+    if (tda->counter > cfg->behavior_count)
+        tda->counter = 1;
 
     tda->is_pressed = true;
-    tda->counter++;
+    restart_reset_timer(tda);
 
-    if (tda->counter > cfg->behavior_count)
-        tda->counter = cfg->behavior_count;
+    struct zmk_behavior_binding act = cfg->behaviors[tda->counter - 1];
+    LOG_DBG("TDA[%d]: pressed, binding %d/%d", event.position, tda->counter, cfg->behavior_count);
 
-    if (tda->counter > 1) {
-        // Отпустить предыдущее поведение и запустить следующее
-        release_tda_behavior(tda, event.timestamp);
-    }
-
-    press_tda_behavior(tda, event.timestamp);
-    reset_timer(tda, event);
-    return ZMK_BEHAVIOR_OPAQUE;
+    return zmk_behavior_invoke_binding(&act, event, true);
 }
 
 static int on_tda_released(struct zmk_behavior_binding *binding,
                            struct zmk_behavior_binding_event event) {
     struct active_tda *tda = find_tda(event.position);
-    if (!tda)
+    if (!tda || !tda->is_pressed)
         return ZMK_BEHAVIOR_OPAQUE;
 
     tda->is_pressed = false;
-    release_tda_behavior(tda, event.timestamp);
-    clear_tda(tda);
-    return ZMK_BEHAVIOR_OPAQUE;
+
+    const struct behavior_tda_config *cfg = tda->config;
+    if (cfg->behavior_count == 0)
+        return ZMK_BEHAVIOR_OPAQUE;
+
+    struct zmk_behavior_binding act = cfg->behaviors[tda->counter - 1];
+    LOG_DBG("TDA[%d]: released binding %d", event.position, tda->counter);
+    return zmk_behavior_invoke_binding(&act, event, false);
 }
 
 static const struct behavior_driver_api behavior_tda_driver_api = {
     .binding_pressed = on_tda_pressed,
     .binding_released = on_tda_released,
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
+    .get_parameter_metadata = zmk_behavior_get_empty_param_metadata,
+#endif
 };
 
 static int behavior_tda_init(const struct device *dev) {
-    static bool first_run = true;
-    if (first_run) {
+    static bool init_once = true;
+    if (init_once) {
         for (int i = 0; i < ZMK_BHV_TDA_MAX_HELD; i++) {
-            k_work_init_delayable(&active_tdas[i].release_timer, tda_timer_handler);
             clear_tda(&active_tdas[i]);
+            k_work_init_delayable(&active_tdas[i].reset_timer, tda_reset_timer_handler);
         }
-        first_run = false;
+        init_once = false;
     }
     return 0;
 }
@@ -194,16 +195,17 @@ static int behavior_tda_init(const struct device *dev) {
 #define TRANSFORMED_BINDINGS(node) \
     { LISTIFY(DT_INST_PROP_LEN(node, bindings), _TRANSFORM_ENTRY, (, ), DT_DRV_INST(node)) }
 
-#define KP_INST(n) \
-    static struct zmk_behavior_binding behavior_tda_config_##n##_bindings[DT_INST_PROP_LEN(n, bindings)] = \
-        TRANSFORMED_BINDINGS(n); \
-    static struct behavior_tda_config behavior_tda_config_##n = { \
-        .tapping_term_ms = DT_INST_PROP(n, tapping_term_ms), \
-        .behaviors = behavior_tda_config_##n##_bindings, \
-        .behavior_count = DT_INST_PROP_LEN(n, bindings) }; \
-    BEHAVIOR_DT_INST_DEFINE(n, behavior_tda_init, NULL, NULL, \
-                            &behavior_tda_config_##n, POST_KERNEL, \
-                            CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &behavior_tda_driver_api);
+#define KP_INST(n)                                                                                 \
+    static struct zmk_behavior_binding                                                             \
+        behavior_tda_config_##n##_bindings[DT_INST_PROP_LEN(n, bindings)] =                        \
+            TRANSFORMED_BINDINGS(n);                                                               \
+    static struct behavior_tda_config behavior_tda_config_##n = {                                  \
+        .tapping_term_ms = DT_INST_PROP_OR(n, tapping_term_ms, 0),                                 \
+        .behaviors = behavior_tda_config_##n##_bindings,                                           \
+        .behavior_count = DT_INST_PROP_LEN(n, bindings)};                                          \
+    BEHAVIOR_DT_INST_DEFINE(n, behavior_tda_init, NULL, NULL, &behavior_tda_config_##n,            \
+                            POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                      \
+                            &behavior_tda_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(KP_INST)
 
